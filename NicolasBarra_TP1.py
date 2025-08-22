@@ -142,7 +142,7 @@ class PipelineDeNoticias:
             logger.info("Extrayendo fuentes de noticias...")
             endpoint = "/news/sources"
             url = f"{self.API_BASE_URL}{endpoint}"
-            params = {"api_token": self.api_key}
+            params = {"api_token": self.api_key, "locale": os.getenv("DEFAULT_COUNTRY", "us"), "language": os.getenv("DEFAULT_LANGUAGE", "en")}
 
             response = self.session.get(url, params=params)
             response.raise_for_status()
@@ -181,7 +181,7 @@ class PipelineDeNoticias:
                 elif pd.api.types.is_datetime64_any_dtype(df_limpio[col]):
                     df_limpio[col] = df_limpio[col].astype(str).fillna('')
 
-            write_deltalake(ruta_tabla, df_limpio, mode=modo, partition_by=particionado_por)
+            write_deltalake(ruta_tabla, df_limpio, mode=modo, partition_by=particionado_por, schema_mode="merge")
             logger.info(f"Datos guardados en Delta Lake: {ruta_tabla} (Modo: {modo})")
             self._guardar_metadatos_pipeline(os.path.basename(ruta_tabla), len(df_limpio), ruta_tabla, modo)
 
@@ -226,8 +226,7 @@ class PipelineDeNoticias:
             if 'categories' in df_fuentes.columns:
                 columnas_a_unir.append('categories')
 
-            df_enriquecido = pd.merge(df_noticias, df_fuentes[columnas_a_unir], on='fuente_id', how='left')
-            logger.info(f"Transformación 6: Join completado. {len(df_enriquecido)} registros enriquecidos.")
+            df_enriquecido = pd.merge(df_noticias, df_fuentes[columnas_a_unir], left_on='dominio_fuente', right_on='fuente_nombre', how='left')
 
             df_enriquecido['es_titular_corto'] = df_enriquecido['es_titular_corto'].astype(bool)
             if 'fecha_particion' in df_enriquecido.columns:
@@ -250,6 +249,7 @@ class PipelineDeNoticias:
                 return
 
             logger.info("Iniciando agregación de datos por fuente...")
+            df_procesado['fuente_nombre'] = df_procesado['fuente_nombre'].fillna('Fuente Desconocida')
             df_agregado = df_procesado.groupby('fuente_nombre').agg(cantidad_noticias=('uuid', 'count')).reset_index()
             logger.info(f"Agregación completada. {len(df_agregado)} fuentes agregadas.")
 
@@ -301,7 +301,7 @@ class PipelineDeNoticias:
             "noticias_extraidas": len(df_noticias),
             "fuentes_extraidas": len(df_fuentes),
             "noticias_procesadas": len(df_procesado),
-            "fuentes_agregadas": len(df_procesado.groupby('fuente_id')) if not df_procesado.empty else 0
+            "fuentes_agregadas": len(df_procesado.groupby('fuente_nombre')) if not df_procesado.empty else 0
         }
 
 def main():

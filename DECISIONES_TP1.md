@@ -34,6 +34,7 @@
 -   **Implementación:** Extrae todos los datos en cada ejecución
 -   **Particionamiento:** Por categoría (si está disponible)
 -   **Ventajas:** Garantiza datos completos y actualizados
+-   **Alineación con Extracción de Noticias:** La extracción de fuentes ahora incluye filtros por 'locale' e 'language' para asegurar que las fuentes sean relevantes para las noticias extraídas.
 
 ## 3. Almacenamiento en Delta Lake Real
 
@@ -45,7 +46,7 @@
 
 ### Particionamiento Real
 
--   **Noticias:** Por fecha y hora para optimizar consultas temporales
+-   **Noticias:** Por fecha (`fecha_particion`) para optimizar consultas temporales y alinearse con la granularidad de actualización diaria.
 -   **Fuentes:** Por categoría para facilitar filtros
 -   **Beneficios:** Mejora rendimiento de consultas y organización
 -   **Implementación:** Estructura de directorios nativa de Delta Lake
@@ -104,6 +105,7 @@ delta_lake/
 -   **Conversión de tipos:** Manejo de valores nulos y tipos problemáticos
 -   **Particionamiento:** Conversión de columnas de particionamiento a string
 -   **Compatibilidad:** Asegurar compatibilidad con formato Delta Lake
+-   **Manejo de Fuentes Desconocidas:** Se rellenan los valores nulos en la columna 'fuente_nombre' con 'Fuente Desconocida' antes de la agregación para asegurar la integridad de los datos y permitir la agrupación.
 
 ## 6. Compatibilidad y Portabilidad
 

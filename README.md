@@ -29,8 +29,9 @@ Este proyecto implementa un pipeline de datos completo para la extracción, **pr
     *   **Creación de columna booleana**: `es_titular_corto` basada en la longitud del título.
     *   **Manejo de nulos**: Relleno de valores nulos en la descripción con 'Sin descripción'.
     *   **Extracción de dominio**: Creación de la columna `dominio_fuente` a partir de la URL.
-    *   **Enriquecimiento con JOIN**: Unión de datos de noticias con información de fuentes (categoría, nombre de fuente).
+    *   **Enriquecimiento con JOIN**: Unión de datos de noticias con información de fuentes (categoría, nombre de fuente) utilizando el dominio de la URL de la noticia y el dominio de la fuente.
     *   **Agregación con GROUP BY**: Conteo de noticias por `fuente_nombre` para generar métricas.
+    *   **Manejo de fuentes desconocidas**: Relleno de valores nulos en 'fuente_nombre' con 'Fuente Desconocida' para asegurar la agregación.
 
 4.  **Almacenamiento en Delta Lake Real**
 
@@ -190,6 +191,7 @@ pytest tests/
 
 *   **Incremental para noticias:** Solo extrae datos nuevos
 *   **Full para fuentes:** Extrae todos los datos (cambian poco)
+*   **Alineación de Extracción de Fuentes:** La extracción de fuentes ahora incluye filtros por 'locale' e 'language' para asegurar la coherencia con las noticias extraídas.
 
 ### Estructura del Data Lake
 
