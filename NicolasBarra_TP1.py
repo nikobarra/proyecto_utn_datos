@@ -1,338 +1,334 @@
 """
-Trabajo Práctico 1 - Extracción y Almacenamiento de Datos
+Trabajo Práctico 1 - Extracción, Almacenamiento y Procesamiento de Datos
 Autor: Nicolás Barra
 Fecha: 2025
 
-Este programa implementa:
-1. Extracción de datos de The News API (2 endpoints)
-2. Conversión a DataFrames de Pandas
-3. Almacenamiento en formato Delta Lake con particionamiento
-4. Extracción incremental para noticias y full para fuentes
+Este programa implementa un pipeline de datos completo que:
+1. Extrae datos de noticias y fuentes desde The News API.
+2. Almacena los datos crudos en formato Delta Lake.
+3. Procesa, limpia y enriquece los datos de noticias.
+4. Genera una tabla agregada con estadísticas.
+5. Guarda los resultados procesados y agregados en Delta Lake.
+6. Sigue buenas prácticas de código, como modularidad, documentación y legibilidad.
 """
 
-import requests
-import pandas as pd
-import os
-from datetime import datetime
-import json
-from typing import List
 import logging
+import os
+import json
+from datetime import datetime
+from typing import List, Dict, Any
+from urllib.parse import urlparse
+
+import pandas as pd
+import requests
 from dotenv import load_dotenv
-from deltalake import write_deltalake
+from deltalake import write_deltalake, DeltaTable
 
-# Cargar variables de entorno
-load_dotenv("config.env")
-
-# Configuración de logging
+# --- Configuración de Logging ---
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
+# --- Carga de Variables de Entorno ---
+load_dotenv("config.env")
 
-class NewsDataExtractor:
+
+class PipelineDeNoticias:
     """
-    Clase para extraer y almacenar datos de The News API
+    Clase que encapsula un pipeline de ETL para datos de noticias.
+
+    Orquesta la extracción, procesamiento y carga de datos, siguiendo
+    buenas prácticas de modularidad y documentación.
     """
+
+    # --- Constantes de Configuración ---
+    DATA_LAKE_BASE = os.getenv("DATA_LAKE_BASE", "delta_lake")
+    API_BASE_URL = os.getenv("API_BASE_URL", "https://api.thenewsapi.com/v1")
+    API_TOKEN = os.getenv("API_TOKEN")
+
+    # Rutas de las tablas
+    # Capa Bronze: Datos crudos del origen
+    RUTA_BRONZE_NOTICIAS = f"{DATA_LAKE_BASE}/bronze/thenewsapi/top_stories"
+    RUTA_BRONZE_FUENTES = f"{DATA_LAKE_BASE}/bronze/thenewsapi/sources"
+    # Capa Silver: Datos procesados y enriquecidos
+    RUTA_SILVER_NOTICIAS_ENRIQUECIDAS = f"{DATA_LAKE_BASE}/silver/top_stories_enriched"
+    # Capa Gold: Datos agregados y curados
+    RUTA_GOLD_CONTEO_POR_FUENTE = f"{DATA_LAKE_BASE}/gold/news_count_by_source"
+    # Logs
+    RUTA_LOGS = f"{DATA_LAKE_BASE}/logs"
 
     def __init__(self, api_key: str = None):
         """
-        Inicializa el extractor de datos
+        Inicializa el pipeline de noticias.
 
         Args:
-            api_key: Clave de API (opcional para endpoints públicos)
+            api_key (str, optional): La clave de API para The News API.
+                                     Si no se provee, se toma de las variables de entorno.
         """
-        # Cargar configuración desde variables de entorno
-        self.base_url = os.getenv("API_BASE_URL", "https://api.thenewsapi.com/v1")
-        self.api_key = api_key or os.getenv("API_TOKEN")
+        self.api_key = api_key or self.API_TOKEN
         self.session = requests.Session()
-
-        # Configurar headers
         if self.api_key:
             self.session.headers.update({"Authorization": f"Bearer {self.api_key}"})
+        self._crear_directorios_data_lake()
 
-        # Crear directorios base para Delta Lake
-        self.data_lake_base = os.getenv("DATA_LAKE_BASE", "delta_lake")
-        self.create_data_lake_directories()
-
-    def create_data_lake_directories(self):
-        """
-        Crea la estructura de directorios para el data lake
-        """
-        directories = [
-            f"{self.data_lake_base}/news/top_stories",
-            f"{self.data_lake_base}/news/sources",
-            f"{self.data_lake_base}/logs",
+    def _crear_directorios_data_lake(self):
+        """Crea la estructura de directorios necesaria para el Data Lake."""
+        directorios = [
+            self.RUTA_BRONZE_NOTICIAS,
+            self.RUTA_BRONZE_FUENTES,
+            self.RUTA_SILVER_NOTICIAS_ENRIQUECIDAS,
+            self.RUTA_GOLD_CONTEO_POR_FUENTE,
+            self.RUTA_LOGS,
         ]
+        for directorio in directorios:
+            os.makedirs(directorio, exist_ok=True)
+            logger.info(f"Directorio creado/verificado: {directorio}")
 
-        for directory in directories:
-            os.makedirs(directory, exist_ok=True)
-            logger.info(f"Directorio creado/verificado: {directory}")
-
-    def extract_top_stories(
-        self, country: str = None, language: str = None, limit: int = None
-    ) -> pd.DataFrame:
+    def extraer_noticias_principales(self, pais: str = None, idioma: str = None, limite: int = None) -> pd.DataFrame:
         """
-        Extrae noticias top (datos temporales)
-
-        Args:
-            country: País de las noticias
-            language: Idioma
-            limit: Número máximo de noticias
-
-        Returns:
-            DataFrame con las noticias top
+        Extrae las noticias principales desde el endpoint /news/top de la API.
         """
         try:
-            # Usar valores por defecto desde variables de entorno
-            country = country or os.getenv("DEFAULT_COUNTRY", "us")
-            language = language or os.getenv("DEFAULT_LANGUAGE", "en")
-            limit = limit or int(os.getenv("DEFAULT_LIMIT", "100"))
+            pais = pais or os.getenv("DEFAULT_COUNTRY", "us")
+            idioma = idioma or os.getenv("DEFAULT_LANGUAGE", "en")
+            limite = limite or int(os.getenv("DEFAULT_LIMIT", "3"))
+            logger.info(f"Extrayendo noticias principales para el país: {pais}")
 
-            logger.info(f"Extrayendo noticias top para país: {country}")
-
-            endpoint = os.getenv("ENDPOINT_TOP_STORIES", "/news/top")
-            url = f"{self.base_url}{endpoint}"
-            params = {"country": country, "language": language, "limit": limit}
+            endpoint = "/news/top"
+            url = f"{self.API_BASE_URL}{endpoint}"
+            params = {"api_token": self.api_key, "locale": pais, "language": idioma, "limit": limite}
 
             response = self.session.get(url, params=params)
             response.raise_for_status()
-
             data = response.json()
 
             if "data" not in data:
-                logger.error("Respuesta de API no contiene 'data'")
+                logger.error("La respuesta de la API no contiene la clave 'data'")
                 return pd.DataFrame()
 
-            # Convertir a DataFrame
             df = pd.DataFrame(data["data"])
+            df["fecha_extraccion"] = datetime.now()
+            df["endpoint_origen"] = "top_stories"
+            df["pais_consulta"] = pais
+            df["idioma_consulta"] = idioma
 
-            # Agregar metadatos de extracción
-            df["extraction_date"] = datetime.now()
-            df["source_endpoint"] = "top_stories"
-            df["country"] = country
-            df["language"] = language
+            date_col = None
+            if "published_on" in df.columns:
+                date_col = "published_on"
+            elif "published_at" in df.columns:
+                date_col = "published_at"
 
-            # Convertir published_at a datetime
-            if "published_at" in df.columns:
-                df["published_at"] = pd.to_datetime(df["published_at"])
-                df["published_date"] = df["published_at"].dt.date
-                df["published_hour"] = df["published_at"].dt.hour
+            if date_col:
+                df["fecha_publicacion"] = pd.to_datetime(df[date_col])
+                df["fecha_particion"] = df["fecha_publicacion"].dt.date
+                # No se particiona por hora, solo por día
 
-            logger.info(f"Extraídas {len(df)} noticias top")
+            logger.info(f"Se extrajeron {len(df)} noticias principales")
             return df
 
         except requests.exceptions.RequestException as e:
-            logger.error(f"Error en la extracción de noticias top: {e}")
+            logger.error(f"Error de red extrayendo noticias: {e}")
             return pd.DataFrame()
         except Exception as e:
-            logger.error(f"Error inesperado en extracción de noticias top: {e}")
+            logger.error(f"Error inesperado extrayendo noticias: {e}")
             return pd.DataFrame()
 
-    def extract_sources(self) -> pd.DataFrame:
+    def extraer_fuentes(self) -> pd.DataFrame:
         """
-        Extrae información de fuentes (datos estáticos/metadatos)
-
-        Returns:
-            DataFrame con información de fuentes
+        Extrae todas las fuentes de noticias disponibles desde el endpoint /news/sources.
         """
         try:
-            logger.info("Extrayendo información de fuentes")
+            logger.info("Extrayendo fuentes de noticias...")
+            endpoint = "/news/sources"
+            url = f"{self.API_BASE_URL}{endpoint}"
+            params = {"api_token": self.api_key}
 
-            endpoint = os.getenv("ENDPOINT_SOURCES", "/news/sources")
-            url = f"{self.base_url}{endpoint}"
-
-            response = self.session.get(url)
+            response = self.session.get(url, params=params)
             response.raise_for_status()
-
             data = response.json()
 
             if "data" not in data:
-                logger.error("Respuesta de API no contiene 'data'")
+                logger.error("La respuesta de la API no contiene la clave 'data'")
                 return pd.DataFrame()
 
-            # Convertir a DataFrame
             df = pd.DataFrame(data["data"])
-
-            # Agregar metadatos de extracción
-            df["extraction_date"] = datetime.now()
-            df["source_endpoint"] = "sources"
-
-            logger.info(f"Extraídas {len(df)} fuentes")
+            df["fecha_extraccion"] = datetime.now()
+            df["endpoint_origen"] = "sources"
+            logger.info(f"Se extrajeron {len(df)} fuentes")
             return df
 
         except requests.exceptions.RequestException as e:
-            logger.error(f"Error en la extracción de fuentes: {e}")
+            logger.error(f"Error de red extrayendo fuentes: {e}")
             return pd.DataFrame()
         except Exception as e:
-            logger.error(f"Error inesperado en extracción de fuentes: {e}")
+            logger.error(f"Error inesperado extrayendo fuentes: {e}")
             return pd.DataFrame()
 
-    def save_to_delta_lake(
-        self, df: pd.DataFrame, table_name: str, partition_by: List[str] = None
-    ):
+    def guardar_en_delta_lake(self, df: pd.DataFrame, ruta_tabla: str, modo: str = 'append', particionado_por: List[str] = None):
         """
-        Guarda DataFrame en formato Delta Lake real
-
-        Args:
-            df: DataFrame a guardar
-            table_name: Nombre de la tabla
-            partition_by: Columnas para particionamiento
+        Guarda un DataFrame en una tabla Delta Lake.
         """
         try:
             if df.empty:
-                logger.warning(f"DataFrame vacío para {table_name}, no se guarda")
+                logger.warning(f"El DataFrame para '{ruta_tabla}' está vacío, no se guardará.")
                 return
 
-            # Crear directorio de destino
-            delta_path = f"{self.data_lake_base}/news/{table_name}"
-            os.makedirs(delta_path, exist_ok=True)
+            df_limpio = df.copy()
+            for col in df_limpio.columns:
+                if df_limpio[col].dtype == 'object':
+                    df_limpio[col] = df_limpio[col].astype(str).fillna('')
+                elif pd.api.types.is_datetime64_any_dtype(df_limpio[col]):
+                    df_limpio[col] = df_limpio[col].astype(str).fillna('')
 
-            # Limpiar y preparar datos para Delta Lake
-            df_clean = df.copy()
-
-            # Limpiar todas las columnas de valores nulos y tipos problemáticos
-            for col in df_clean.columns:
-                if df_clean[col].dtype == "object":
-                    # Convertir objetos a string y llenar nulos
-                    df_clean[col] = df_clean[col].astype(str).fillna("")
-                elif df_clean[col].dtype == "datetime64[ns]":
-                    # Convertir datetime a string
-                    df_clean[col] = df_clean[col].astype(str).fillna("")
-                else:
-                    # Para otros tipos, llenar nulos con valores apropiados
-                    df_clean[col] = df_clean[col].fillna(0)
-
-            # Configurar particionamiento
-            if partition_by:
-                available_columns = [
-                    col for col in partition_by if col in df_clean.columns
-                ]
-                if available_columns:
-                    logger.info(f"Particionando por: {available_columns}")
-                    # Guardar en formato Delta Lake con particionamiento
-                    write_deltalake(
-                        delta_path,
-                        df_clean,
-                        partition_by=available_columns,
-                        mode="append",
-                    )
-                else:
-                    logger.warning(
-                        f"Columnas de particionamiento no encontradas: {partition_by}"
-                    )
-                    # Guardar sin particionamiento
-                    write_deltalake(delta_path, df_clean, mode="append")
-            else:
-                # Guardar sin particionamiento
-                write_deltalake(delta_path, df_clean, mode="append")
-
-            logger.info(f"Datos guardados en Delta Lake: {delta_path}")
-            logger.info(f"Registros guardados: {len(df_clean)}")
-
-            # Guardar metadatos de la extracción
-            self.save_extraction_metadata(table_name, len(df_clean), delta_path)
+            write_deltalake(ruta_tabla, df_limpio, mode=modo, partition_by=particionado_por)
+            logger.info(f"Datos guardados en Delta Lake: {ruta_tabla} (Modo: {modo})")
+            self._guardar_metadatos_pipeline(os.path.basename(ruta_tabla), len(df_limpio), ruta_tabla, modo)
 
         except Exception as e:
-            logger.error(f"Error guardando en Delta Lake para {table_name}: {e}")
+            logger.error(f"Error guardando en Delta Lake para '{ruta_tabla}': {e}")
 
-    def save_extraction_metadata(
-        self, table_name: str, record_count: int, file_path: str
-    ):
+    def procesar_y_enriquecer_datos(self, ruta_noticias_crudas: str, ruta_fuentes_crudas: str, ruta_tabla_procesada: str) -> pd.DataFrame:
         """
-        Guarda metadatos de la extracción
+        Carga los datos crudos, los procesa, enriquece y guarda el resultado.
+        """
+        try:
+            logger.info(f"Iniciando procesamiento y enriquecimiento desde: {ruta_noticias_crudas}")
+            df_noticias = DeltaTable(ruta_noticias_crudas).to_pandas()
 
-        Args:
-            table_name: Nombre de la tabla
-            record_count: Número de registros
-            file_path: Ruta del archivo guardado
+            if df_noticias.empty:
+                logger.warning("La tabla de noticias crudas está vacía. No hay nada que procesar.")
+                return pd.DataFrame()
+
+            logger.info(f"Leídos {len(df_noticias)} registros de noticias crudas.")
+
+            filas_iniciales = len(df_noticias)
+            df_noticias = df_noticias.drop_duplicates(subset=['uuid'])
+            logger.info(f"Transformación 1: Eliminados {filas_iniciales - len(df_noticias)} duplicados.")
+
+            df_noticias = df_noticias.rename(columns={'source': 'fuente_id'})
+            logger.info("Transformación 2: Columnas renombradas.")
+
+            df_noticias['es_titular_corto'] = df_noticias['title'].str.len() < 50
+            logger.info("Transformación 3: Creada columna 'es_titular_corto'.")
+
+            df_noticias['description'] = df_noticias['description'].fillna('Sin descripción')
+            logger.info("Transformación 4: Nulos rellenados en 'description'.")
+
+            df_noticias['dominio_fuente'] = df_noticias['url'].apply(lambda x: urlparse(x).netloc if pd.notna(x) else None)
+            logger.info("Transformación 5: Creada columna 'dominio_fuente' desde la URL.")
+
+            logger.info("Iniciando join con datos de fuentes...")
+            df_fuentes = DeltaTable(ruta_fuentes_crudas).to_pandas()
+            df_fuentes = df_fuentes.rename(columns={'source_id': 'fuente_id', 'domain': 'fuente_nombre'})
+            
+            columnas_a_unir = ['fuente_id', 'fuente_nombre']
+            if 'categories' in df_fuentes.columns:
+                columnas_a_unir.append('categories')
+
+            df_enriquecido = pd.merge(df_noticias, df_fuentes[columnas_a_unir], on='fuente_id', how='left')
+            logger.info(f"Transformación 6: Join completado. {len(df_enriquecido)} registros enriquecidos.")
+
+            df_enriquecido['es_titular_corto'] = df_enriquecido['es_titular_corto'].astype(bool)
+            if 'fecha_particion' in df_enriquecido.columns:
+                df_enriquecido['fecha_particion'] = pd.to_datetime(df_enriquecido['fecha_particion'])
+
+            self.guardar_en_delta_lake(df_enriquecido, ruta_tabla_procesada, modo='overwrite', particionado_por=['fecha_particion'])
+            return df_enriquecido
+
+        except Exception as e:
+            logger.error(f"Error durante el procesamiento de datos: {e}", exc_info=True)
+            return pd.DataFrame()
+
+    def agregar_datos(self, df_procesado: pd.DataFrame, ruta_tabla_agregada: str):
         """
-        metadata = {
-            "table_name": table_name,
-            "extraction_date": datetime.now().isoformat(),
-            "record_count": record_count,
-            "file_path": file_path,
-            "extraction_type": "incremental" if table_name == "top_stories" else "full",
-            "format": "delta_lake",
+        Genera una tabla agregada a partir de los datos procesados.
+        """
+        try:
+            if df_procesado.empty:
+                logger.warning("DataFrame procesado vacío, no se puede agregar.")
+                return
+
+            logger.info("Iniciando agregación de datos por fuente...")
+            df_agregado = df_procesado.groupby('fuente_nombre').agg(cantidad_noticias=('uuid', 'count')).reset_index()
+            logger.info(f"Agregación completada. {len(df_agregado)} fuentes agregadas.")
+
+            self.guardar_en_delta_lake(df_agregado, ruta_tabla_agregada, modo='overwrite')
+
+        except Exception as e:
+            logger.error(f"Error durante la agregación de datos: {e}")
+
+    def _guardar_metadatos_pipeline(self, nombre_tabla: str, num_registros: int, ruta_archivo: str, operacion: str):
+        """
+        Guarda metadatos de una operación del pipeline en un archivo JSON.
+        """
+        metadatos = {
+            "nombre_tabla": nombre_tabla,
+            "timestamp_operacion": datetime.now().isoformat(),
+            "cantidad_registros": num_registros,
+            "ruta_archivo": ruta_archivo,
+            "operacion": operacion,
+            "formato": "delta_lake",
         }
+        ruta_metadatos = f"{self.RUTA_LOGS}/{nombre_tabla}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        with open(ruta_metadatos, "w") as f:
+            json.dump(metadatos, f, indent=4)
+        logger.info(f"Metadatos de operación guardados: {ruta_metadatos}")
 
-        metadata_path = f"{self.data_lake_base}/logs/{table_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-
-        with open(metadata_path, "w") as f:
-            json.dump(metadata, f, indent=2)
-
-        logger.info(f"Metadatos guardados: {metadata_path}")
-
-    def run_extraction_pipeline(self):
+    def ejecutar_pipeline(self) -> Dict[str, Any]:
         """
-        Ejecuta el pipeline completo de extracción
+        Ejecuta el pipeline completo de extracción, procesamiento y agregación.
         """
-        logger.info("Iniciando pipeline de extracción de datos")
+        logger.info("Iniciando pipeline de datos completo")
 
-        # 1. Extraer noticias top (datos temporales - incremental)
-        logger.info("=== Extrayendo noticias top ===")
-        top_stories_df = self.extract_top_stories()
+        logger.info("=== Fase 1: Extracción de Datos ===")
+        df_noticias = self.extraer_noticias_principales()
+        if not df_noticias.empty:
+            self.guardar_en_delta_lake(df_noticias, self.RUTA_BRONZE_NOTICIAS, modo='overwrite', particionado_por=["fecha_particion"])
 
-        if not top_stories_df.empty:
-            # Guardar con particionamiento por fecha y hora
-            self.save_to_delta_lake(
-                df=top_stories_df,
-                table_name="top_stories",
-                partition_by=["published_date", "published_hour"],
-            )
+        df_fuentes = self.extraer_fuentes()
+        if not df_fuentes.empty:
+            self.guardar_en_delta_lake(df_fuentes, self.RUTA_BRONZE_FUENTES, modo='overwrite', particionado_por=["categories"] if "categories" in df_fuentes.columns else None)
 
-        # 2. Extraer fuentes (datos estáticos - full)
-        logger.info("=== Extrayendo fuentes ===")
-        sources_df = self.extract_sources()
+        logger.info("=== Fase 2: Procesamiento y Enriquecimiento de Datos ===")
+        df_procesado = self.procesar_y_enriquecer_datos(self.RUTA_BRONZE_NOTICIAS, self.RUTA_BRONZE_FUENTES, self.RUTA_SILVER_NOTICIAS_ENRIQUECIDAS)
 
-        if not sources_df.empty:
-            # Guardar con particionamiento opcional por categoría
-            self.save_to_delta_lake(
-                df=sources_df,
-                table_name="sources",
-                partition_by=["category"] if "category" in sources_df.columns else None,
-            )
+        logger.info("=== Fase 3: Agregación de Datos ===")
+        self.agregar_datos(df_procesado, self.RUTA_GOLD_CONTEO_POR_FUENTE)
 
-        logger.info("Pipeline de extracción completado")
-
+        logger.info("Pipeline de datos completado")
         return {
-            "top_stories_count": len(top_stories_df),
-            "sources_count": len(sources_df),
+            "noticias_extraidas": len(df_noticias),
+            "fuentes_extraidas": len(df_fuentes),
+            "noticias_procesadas": len(df_procesado),
+            "fuentes_agregadas": len(df_procesado.groupby('fuente_id')) if not df_procesado.empty else 0
         }
-
 
 def main():
     """
-    Función principal del programa
+    Función principal para ejecutar el pipeline de noticias.
     """
     print("=" * 60)
-    print("TRABAJO PRÁCTICO 1 - EXTRACCIÓN Y ALMACENAMIENTO DE DATOS")
+    print("TRABAJO PRÁCTICO 1 - PIPELINE DE EXTRACCIÓN Y PROCESAMIENTO")
     print("Autor: Nicolás Barra")
-    print("API: The News API")
-    print("Formato: Delta Lake Real")
     print("=" * 60)
 
-    # Inicializar extractor (usa variables de entorno automáticamente)
-    extractor = NewsDataExtractor()
+    pipeline = PipelineDeNoticias()
+    resultados = pipeline.ejecutar_pipeline()
 
-    # Ejecutar pipeline
-    results = extractor.run_extraction_pipeline()
-
-    # Mostrar resultados
     print("\n" + "=" * 60)
-    print("RESULTADOS DE LA EXTRACCIÓN")
+    print("RESULTADOS DEL PIPELINE")
     print("=" * 60)
-    print(f"Noticias top extraídas: {results['top_stories_count']}")
-    print(f"Fuentes extraídas: {results['sources_count']}")
-    print(
-        f"Total de registros: {results['top_stories_count'] + results['sources_count']}"
-    )
-    print("\nDatos guardados en formato Delta Lake en:")
-    print(f"- Noticias: {extractor.data_lake_base}/news/top_stories/")
-    print(f"- Fuentes: {extractor.data_lake_base}/news/sources/")
-    print(f"- Logs: {extractor.data_lake_base}/logs/")
+    print(f"Noticias crudas extraídas: {resultados['noticias_extraidas']}")
+    print(f"Fuentes extraídas: {resultados['fuentes_extraidas']}")
+    print(f"Noticias procesadas y enriquecidas: {resultados['noticias_procesadas']}")
+    print(f"Fuentes únicas en datos procesados: {resultados['fuentes_agregadas']}")
+    print("\nUbicaciones en Delta Lake:")
+    print(f"- Datos Crudos (Bronze): {pipeline.RUTA_BRONZE_NOTICIAS}")
+    print(f"- Datos Procesados (Silver): {pipeline.RUTA_SILVER_NOTICIAS_ENRIQUECIDAS}")
+    print(f"- Datos Agregados (Gold): {pipeline.RUTA_GOLD_CONTEO_POR_FUENTE}")
+    print(f"- Logs: {pipeline.RUTA_LOGS}")
     print("=" * 60)
-
 
 if __name__ == "__main__":
     main()
