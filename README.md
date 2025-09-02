@@ -6,7 +6,7 @@
 
 ## Descripción
 
-Este proyecto implementa un pipeline de datos completo para la extracción, **procesamiento** y almacenamiento de datos utilizando Python, Pandas y **Delta Lake real**. El programa extrae datos de dos endpoints de The News API, aplica diversas transformaciones para limpiar, enriquecer y agregar la información, y finalmente los almacena en un Data Lake estructurado en capas.
+Este proyecto implementa un pipeline de datos completo, **idempotente y re-ejecutable**, para la extracción, procesamiento y almacenamiento de datos utilizando Python, Pandas y Delta Lake. El programa extrae datos de dos endpoints de The News API, aplica diversas transformaciones para limpiar, enriquecer y agregar la información, y finalmente los almacena en un Data Lake estructurado en capas (Bronze, Silver y Gold).
 
 ## Características Implementadas
 
@@ -208,7 +208,7 @@ pytest tests/
 ### Almacenamiento
 
 *   **Delta Lake Real:** Formato nativo con archivos Parquet y metadatos de transacciones (`_delta_log`).
-*   **Modo Overwrite:** Utilizado en las capas Silver y Gold para asegurar la idempotencia y la consistencia de los datos procesados.
+*   **Modo Overwrite (Dinámico):** Utilizado en las capas Silver y Gold. Gracias al particionamiento, solo se sobreescriben las particiones correspondientes a los datos del día en ejecución, asegurando la idempotencia sin eliminar datos históricos de otras particiones.
 
 ### Seguridad
 

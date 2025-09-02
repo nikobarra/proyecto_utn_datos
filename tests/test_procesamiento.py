@@ -69,6 +69,29 @@ def test_procesar_y_enriquecer_datos(pipeline, datos_de_prueba):
     pipeline.guardar_en_delta_lake(fuentes_crudas, pipeline.RUTA_BRONZE_FUENTES, modo='overwrite')
 
     # 2. Acción (Act)
+    pipeline.procesar_y_enriquecer_datos(
+        pipeline.RUTA_BRONZE_NOTICIAS,
+        pipeline.RUTA_BRONZE_FUENTES,
+        pipeline.RUTA_SILVER_NOTICIAS_ENRIQUECIDAS
+    )
+
+    # 3. Aserción (Assert)
+    df_procesado = DeltaTable(pipeline.RUTA_SILVER_NOTICIAS_ENRIQUECIDAS).to_pandas()
+    assert not df_procesado.empty
+    assert len(df_procesado) == 3
+    assert df_procesado['uuid'].is_unique
+    assert 'fuente_id' in df_procesado.columns
+    assert df_procesado.loc[df_procesado['uuid'] == 'a', 'es_titular_corto'].iloc[0] == True
+    assert df_procesado.loc[df_procesado['uuid'] == 'b', 'es_titular_corto'].iloc[0] == False
+    def test_procesar_y_enriquecer_datos(pipeline, datos_de_prueba):
+    """Prueba la lógica de procesamiento y enriquecimiento de datos."""
+    # 1. Preparación (Arrange)
+    noticias_crudas, fuentes_crudas = datos_de_prueba
+    
+    pipeline.guardar_en_delta_lake(noticias_crudas, pipeline.RUTA_BRONZE_NOTICIAS, modo='overwrite')
+    pipeline.guardar_en_delta_lake(fuentes_crudas, pipeline.RUTA_BRONZE_FUENTES, modo='overwrite')
+
+    # 2. Acción (Act)
     df_procesado = pipeline.procesar_y_enriquecer_datos(
         pipeline.RUTA_BRONZE_NOTICIAS,
         pipeline.RUTA_BRONZE_FUENTES,
@@ -83,6 +106,10 @@ def test_procesar_y_enriquecer_datos(pipeline, datos_de_prueba):
     assert df_procesado.loc[df_procesado['uuid'] == 'a', 'es_titular_corto'].iloc[0] == True
     assert df_procesado.loc[df_procesado['uuid'] == 'b', 'es_titular_corto'].iloc[0] == False
     assert df_procesado.loc[df_procesado['uuid'] == 'b', 'description'].iloc[0] == 'Sin descripción'
+    assert df_procesado.loc[df_procesado['uuid'] == 'a', 'dominio_fuente'].iloc[0] == 'example.com'
+    assert 'fuente_nombre' in df_procesado.columns
+    assert df_procesado.loc[df_procesado['uuid'] == 'b', 'fuente_nombre'].iloc[0] == 'Fuente Dos'
+    assert df_procesado['es_titular_corto'].dtype == bool
     assert df_procesado.loc[df_procesado['uuid'] == 'a', 'dominio_fuente'].iloc[0] == 'example.com'
     assert 'fuente_nombre' in df_procesado.columns
     assert df_procesado.loc[df_procesado['uuid'] == 'b', 'fuente_nombre'].iloc[0] == 'Fuente Dos'

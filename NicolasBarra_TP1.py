@@ -168,6 +168,14 @@ class PipelineDeNoticias:
     def guardar_en_delta_lake(self, df: pd.DataFrame, ruta_tabla: str, modo: str = 'append', particionado_por: List[str] = None):
         """
         Guarda un DataFrame en una tabla Delta Lake.
+
+        Args:
+            df (pd.DataFrame): El DataFrame a guardar.
+            ruta_tabla (str): La ruta de la tabla Delta.
+            modo (str): 'append' o 'overwrite'. Si es 'overwrite' y la tabla está particionada,
+                      se activa el modo de sobreescritura dinámica, reemplazando solo las
+                      particiones presentes en el DataFrame actual.
+            particionado_por (List[str], optional): Lista de columnas por las que particionar.
         """
         try:
             if df.empty:
@@ -188,7 +196,7 @@ class PipelineDeNoticias:
         except Exception as e:
             logger.error(f"Error guardando en Delta Lake para '{ruta_tabla}': {e}")
 
-    def procesar_y_enriquecer_datos(self, ruta_noticias_crudas: str, ruta_fuentes_crudas: str, ruta_tabla_procesada: str) -> pd.DataFrame:
+    def procesar_y_enriquecer_datos(self, ruta_noticias_crudas: str, ruta_fuentes_crudas: str, ruta_tabla_procesada: str):
         """
         Carga los datos crudos, los procesa, enriquece y guarda el resultado.
         """
@@ -198,7 +206,7 @@ class PipelineDeNoticias:
 
             if df_noticias.empty:
                 logger.warning("La tabla de noticias crudas está vacía. No hay nada que procesar.")
-                return pd.DataFrame()
+                return
 
             logger.info(f"Leídos {len(df_noticias)} registros de noticias crudas.")
 
@@ -233,17 +241,16 @@ class PipelineDeNoticias:
                 df_enriquecido['fecha_particion'] = pd.to_datetime(df_enriquecido['fecha_particion'])
 
             self.guardar_en_delta_lake(df_enriquecido, ruta_tabla_procesada, modo='overwrite', particionado_por=['fecha_particion'])
-            return df_enriquecido
 
         except Exception as e:
             logger.error(f"Error durante el procesamiento de datos: {e}", exc_info=True)
-            return pd.DataFrame()
 
-    def agregar_datos(self, df_procesado: pd.DataFrame, ruta_tabla_agregada: str):
+    def agregar_datos(self, ruta_tabla_procesada: str, ruta_tabla_agregada: str):
         """
         Genera una tabla agregada a partir de los datos procesados.
         """
         try:
+            df_procesado = DeltaTable(ruta_tabla_procesada).to_pandas()
             if df_procesado.empty:
                 logger.warning("DataFrame procesado vacío, no se puede agregar.")
                 return
@@ -278,6 +285,9 @@ class PipelineDeNoticias:
     def ejecutar_pipeline(self) -> Dict[str, Any]:
         """
         Ejecuta el pipeline completo de extracción, procesamiento y agregación.
+
+        El pipeline está diseñado para ser idempotente. Re-ejecutar el pipeline
+        para el mismo período de tiempo producirá el mismo resultado en el Data Lake.
         """
         logger.info("Iniciando pipeline de datos completo")
 
@@ -291,12 +301,15 @@ class PipelineDeNoticias:
             self.guardar_en_delta_lake(df_fuentes, self.RUTA_BRONZE_FUENTES, modo='overwrite', particionado_por=["categories"] if "categories" in df_fuentes.columns else None)
 
         logger.info("=== Fase 2: Procesamiento y Enriquecimiento de Datos ===")
-        df_procesado = self.procesar_y_enriquecer_datos(self.RUTA_BRONZE_NOTICIAS, self.RUTA_BRONZE_FUENTES, self.RUTA_SILVER_NOTICIAS_ENRIQUECIDAS)
+        self.procesar_y_enriquecer_datos(self.RUTA_BRONZE_NOTICIAS, self.RUTA_BRONZE_FUENTES, self.RUTA_SILVER_NOTICIAS_ENRIQUECIDAS)
 
         logger.info("=== Fase 3: Agregación de Datos ===")
-        self.agregar_datos(df_procesado, self.RUTA_GOLD_CONTEO_POR_FUENTE)
+        self.agregar_datos(self.RUTA_SILVER_NOTICIAS_ENRIQUECIDAS, self.RUTA_GOLD_CONTEO_POR_FUENTE)
 
         logger.info("Pipeline de datos completado")
+        
+        df_procesado = DeltaTable(self.RUTA_SILVER_NOTICIAS_ENRIQUECIDAS).to_pandas()
+
         return {
             "noticias_extraidas": len(df_noticias),
             "fuentes_extraidas": len(df_fuentes),
